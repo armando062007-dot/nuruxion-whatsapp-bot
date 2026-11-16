@@ -15,8 +15,9 @@ La conversión de audio usa FFmpeg. Instala FFmpeg y, si lo necesitas, yt-dlp de
 
 ## Antes de compartir
 
-Publica solo código, documentación y datos ficticios. Guarda credenciales, sesiones, números privados, registros y datos de usuarios fuera de Git. Si ya expusiste una credencial, revócala o rótala; si se expuso la sesión de WhatsApp, desvincula ese dispositivo. No subas copias del host ni el historial de trabajo.
+Los comandos que cambian ajustes compartidos, entregan saldo manualmente o modifican el catálogo musical se reservan a la cuenta del bot y al propietario configurado. Los administradores de cada grupo conservan la moderación de su grupo. La búsqueda externa de conocimiento y el servicio externo de IA están desactivados de fábrica; actívalos solo si aceptas enviar consultas a esos servicios. Los gráficos se renderizan en el servidor.
 
+Publica solo código, documentación y datos ficticios. Guarda credenciales, sesiones, números privados, registros y datos de usuarios fuera de Git. Si ya expusiste una credencial, revócala o rótala; si se expuso la sesión de WhatsApp, desvincula ese dispositivo. No subas copias del host ni el historial de trabajo.
 
 ## Derechos de autor
 
