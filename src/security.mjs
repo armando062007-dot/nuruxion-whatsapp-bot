@@ -2,6 +2,30 @@ import { createHash } from 'node:crypto'
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 
+const MATH_OPERATORS = new Set(['add', 'subtract', 'multiply', 'divide', 'pow', 'mod', 'unaryMinus', 'unaryPlus', 'factorial', 'percentage'])
+const MATH_FUNCTIONS = new Set(['abs', 'acos', 'asin', 'atan', 'ceil', 'combinations', 'cos', 'exp', 'factorial', 'floor', 'gcd', 'lcm', 'log', 'log10', 'max', 'min', 'nthRoot', 'permutations', 'round', 'sin', 'sqrt', 'tan'])
+const MATH_BOUNDED = new Set(['factorial', 'combinations', 'permutations'])
+
+export function validateScalarMath(node, allowVariable = false) {
+  let count = 0
+  const names = new Set(['pi', 'e', 'i', ...(allowVariable ? ['x'] : [])])
+  // A short range or matrix expression can allocate far more than its input size.
+  node.traverse((child, path, parent) => {
+    if (++count > 100) throw new Error('Expresión demasiado compleja')
+    if (child.isSymbolNode && (names.has(child.name) || (path === 'fn' && parent?.isFunctionNode && MATH_FUNCTIONS.has(child.name)))) return
+    if (child.isConstantNode && typeof child.value === 'number' && Number.isFinite(child.value)) return
+    if (child.isParenthesisNode) return
+    let name
+    if (child.isOperatorNode && MATH_OPERATORS.has(child.fn)) name = child.fn
+    else if (child.isFunctionNode && child.fn?.isSymbolNode && MATH_FUNCTIONS.has(child.fn.name)) name = child.fn.name
+    else throw new Error('Operación no permitida')
+    if (MATH_BOUNDED.has(name) && child.args.some(arg => !arg.isConstantNode ||
+        !Number.isInteger(arg.value) || arg.value < 0 || arg.value > (name === 'combinations' ? 10_000 : 170))) {
+      throw new Error('La operación supera el límite permitido')
+    }
+  })
+}
+
 export function accountId(value) {
   const match = /^(\d+)(?::\d+)?@(s\.whatsapp\.net|c\.us|lid)$/.exec(String(value || ''))
   return match ? match[1] + '@' + (match[2] === 'c.us' ? 's.whatsapp.net' : match[2]) : null

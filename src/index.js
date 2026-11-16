@@ -6,7 +6,7 @@ import { createCommunityPromoter } from './community-admin.mjs'
 import { ecoRoto } from './eco-roto.mjs'
 import { createMusicSystem } from './music-system.mjs'
 import { supplies, refreshSupplyStock, rewardWithSupply } from './kingdom-supplies.mjs'
-import { accountId, sameAccount, createIngress, createQuestionLimiter, collectBounded, whatsappMediaUrl } from './security.mjs'
+import { accountId, sameAccount, createIngress, createQuestionLimiter, collectBounded, whatsappMediaUrl, validateScalarMath } from './security.mjs'
 import fs from 'node:fs/promises'
 import { writeFileSync, renameSync } from 'node:fs'
 import os from 'node:os'
@@ -1738,7 +1738,6 @@ const WEDDING_GIFT_TYPES = ['dinero', 'banco', 'escudo', 'xp', 'impulso', 'indul
 const WEDDING_GIFT_MAX_COUNT = 3
 let economyState = { halloween2026: null, wallets: {}, robCooldowns: {}, workCooldowns: {}, workUsage: {}, blackjackGames: {}, companies: {}, inventory: {}, dailyCooldowns: {}, firstSeenAt: {}, dailyStreaks: {}, messageCounts: {}, xp: {}, customQuotes: {}, groupJoinedAt: {}, launchResetDone: false, betaWarningShown: {}, shopStock: {}, loans: {}, explore: {}, mine: {}, mineMiracleUsed: false, mineDestroyed: false }
 const math = createMath(mathFunctions, { number: 'number', precision: 64 })
-const ALLOWED_MATH_FUNCTIONS = new Set(['abs', 'acos', 'asin', 'atan', 'ceil', 'combinations', 'cos', 'exp', 'factorial', 'floor', 'gcd', 'lcm', 'log', 'log10', 'max', 'min', 'nthRoot', 'permutations', 'round', 'sin', 'sqrt', 'tan'])
 
 
 // ===================================================================
@@ -1769,21 +1768,10 @@ function normalizedMathExpression(value = '') {
     .trim()
 }
 
-function validateMathTree(node, allowVariable = false) {
-  let count = 0
-  node.traverse(child => {
-    count += 1
-    if (count > 100) throw new Error('Expresión demasiado compleja')
-    if (child.isFunctionNode && !ALLOWED_MATH_FUNCTIONS.has(child.fn?.name || '')) throw new Error('Función no permitida')
-    if (child.isSymbolNode && !['pi', 'e', 'i', ...(allowVariable ? ['x'] : [])].includes(child.name)) throw new Error('Variable no permitida')
-    if (child.isAssignmentNode || child.isAccessorNode || child.isBlockNode || child.isObjectNode) throw new Error('Operación no permitida')
-  })
-}
-
 function evaluateSafeMath(expression, scope = {}, allowVariable = false) {
   if (!expression || expression.length > 200) throw new Error('Expresión vacía o demasiado larga')
   const node = math.parse(expression)
-  validateMathTree(node, allowVariable)
+  validateScalarMath(node, allowVariable)
   return node.evaluate(scope)
 }
 
