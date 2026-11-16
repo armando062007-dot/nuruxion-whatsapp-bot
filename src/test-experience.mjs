@@ -1,0 +1,42 @@
+import assert from 'node:assert/strict'
+import { progress, missionView, recordReward, recordDungeon, dungeonView, journeyView, dailyView, inventoryView } from './experience.mjs'
+assert.equal(progress(2,4),'▰▰▰▰▱▱▱▱ 2/4')
+assert.equal(progress(100,4),'▰▰▰▰▰▰▰▰ 4/4')
+assert.equal(progress(-9,4),'▱▱▱▱▱▱▱▱ 0/4')
+const snapshot={dailyMessages:10,weeklyDays:2,bossDamage:500}
+const frozen=JSON.stringify(snapshot)
+assert.match(missionView(snapshot,['+250 monedas'],'\nRelato'),/✅/)
+assert.match(missionView(snapshot),/automáticamente/)
+assert.equal(JSON.stringify(snapshot),frozen)
+const root={wallets:{u:{wallet:500}},inventory:{u:{owned:['x']}},halloween2026:{boss:{damage:{u:400}}},christmas2026:{tree:12}}
+const base=JSON.stringify(root)
+let last=''
+for(let i=0;i<10;i++)last=recordReward(root,'u','work',100,7,Date.parse('2026-11-01T12:00:00Z')+i)
+assert.match(last,/Nueva distinción/)
+assert.match(last,/Oficial del gremio/)
+assert.equal(root.journey.u.work,10)
+assert.equal(root.journey.u.rewards.length,6)
+recordReward(root,'u','daily',650,65)
+assert.equal(root.journey.u.daily,1)
+assert.match(journeyView(root,'u',true),/Últimas recompensas/)
+assert.doesNotMatch(journeyView(root,'u',false),/Últimas recompensas/)
+assert.ok(journeyView(root,'u',true).length<=430)
+assert.match(recordDungeon(root,'u',5),/mochila invisible/)
+assert.equal(recordDungeon(root,'u',5),'')
+assert.match(recordDungeon(root,'u',30),/luz del umbral/)
+assert.equal(root.journey.u.bestFloor,30)
+assert.equal(root.journey.u.chapters.length,3)
+const saved=JSON.parse(JSON.stringify(root))
+assert.equal(recordDungeon(saved,'u',30),'','no repeated chapter after restart')
+const {journey,...unchanged}=root
+assert.equal(JSON.stringify(unchanged),base,'journal cannot modify balances, inventory or events')
+assert.match(dungeonView({currentFloor:6,hp:2,maxHp:10}),/próximo piso de jefe: 10/)
+assert.match(dungeonView({currentFloor:5,hp:2,maxHp:10}),/debilitado/)
+assert.match(dailyView(7,Date.parse('2026-11-02T06:00:00Z')),/7\/7/)
+const inventory={owned:['espada_arcana','cuerda','cuerda','medalla'],equippedSword:'espada_arcana',buffs:{rapido:200,vencido:1}}
+const before=JSON.stringify(inventory)
+const find=id=>({name:id,category:id==='medalla'?'permanente':'temporal'})
+const caption=inventoryView(inventory,find,100)
+assert.match(caption,/cuerda ×2/);assert.match(caption,/equipado/);assert.match(caption,/Distinciones/);assert.match(caption,/rapido/);assert.doesNotMatch(caption,/vencido ·/)
+assert.equal(JSON.stringify(inventory),before)
+assert.ok(inventoryView({owned:Array.from({length:100},(_,i)=>'x'+i+'a'.repeat(100)),buffs:{}},find).length<=850)
