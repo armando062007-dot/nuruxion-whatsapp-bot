@@ -16,3 +16,10 @@ La conversión de audio usa FFmpeg. Instala FFmpeg y, si lo necesitas, yt-dlp de
 ## Antes de compartir
 
 Publica solo código, documentación y datos ficticios. Guarda credenciales, sesiones, números privados, registros y datos de usuarios fuera de Git. Si ya expusiste una credencial, revócala o rótala; si se expuso la sesión de WhatsApp, desvincula ese dispositivo. No subas copias del host ni el historial de trabajo.
+
+
+## Derechos de autor
+
+© 2026 Armando González García, titular de la cuenta de GitHub `armando062007-dot`. Todos los derechos reservados sobre el código y los contenidos originales de Nuruxion.
+
+Las dependencias y los materiales de terceros conservan sus propias licencias y derechos.
