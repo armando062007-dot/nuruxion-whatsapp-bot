@@ -1,0 +1,25 @@
+{
+  "name": "nuruxion-whatsapp-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Copia de portafolio de Nuruxion, un bot comunitario para WhatsApp.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "check": "node --check src/index.js",
+    "test": "node --test src/test-*.mjs"
+  },
+  "dependencies": {
+    "@hapi/boom": "^10.0.1",
+    "@whiskeysockets/baileys": "7.0.0-rc14",
+    "dotenv": "^17.2.3",
+    "mathjs": "^15.1.0",
+    "node-cache": "^5.1.2",
+    "pino": "^10.1.0",
+    "qrcode-terminal": "^0.12.0",
+    "sharp": "0.35.5"
+  }
+}
