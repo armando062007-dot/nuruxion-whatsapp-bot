@@ -24,3 +24,7 @@ Publica solo código, documentación y datos ficticios. Guarda credenciales, ses
 © 2026 Armando González García, titular de la cuenta de GitHub `armando062007-dot`. Todos los derechos reservados sobre el código y los contenidos originales de Nuruxion.
 
 Las dependencias y los materiales de terceros conservan sus propias licencias y derechos.
+
+## Encargos de bots para WhatsApp
+
+Si te interesa encargar un bot para WhatsApp, escríbeme a [armandoggz09a@gmail.com](mailto:armandoggz09a@gmail.com) y cuéntame qué te gustaría que hiciera.
