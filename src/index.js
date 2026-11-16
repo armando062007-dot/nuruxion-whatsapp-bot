@@ -6,6 +6,7 @@ import { createCommunityPromoter } from './community-admin.mjs'
 import { ecoRoto } from './eco-roto.mjs'
 import { createMusicSystem } from './music-system.mjs'
 import { supplies, refreshSupplyStock, rewardWithSupply } from './kingdom-supplies.mjs'
+import { accountId, sameAccount, createIngress, createQuestionLimiter, collectBounded, whatsappMediaUrl } from './security.mjs'
 import fs from 'node:fs/promises'
 import { writeFileSync, renameSync } from 'node:fs'
 import os from 'node:os'
@@ -20,7 +21,6 @@ import { Boom } from '@hapi/boom'
 import makeWASocket, {
   Browsers,
   DisconnectReason,
-  areJidsSameUser,
   downloadContentFromMessage,
   jidNormalizedUser,
   useMultiFileAuthState
@@ -48,6 +48,8 @@ const GENERAL_CHAT_GROUP_NAME = process.env.GENERAL_CHAT_GROUP_NAME || 'General'
 const NIGHT_CHAT_GROUP_NAME = process.env.NIGHT_CHAT_GROUP_NAME || 'chat nocturno'
 const NURUXION_AI_URL = (process.env.NURUXION_AI_URL || 'http://127.0.0.1:3217').replace(/\/$/, '')
 const NURUXION_AI_TOKEN = process.env.NURUXION_AI_TOKEN || ''
+const EXTERNAL_KNOWLEDGE_ENABLED = process.env.ALLOW_EXTERNAL_KNOWLEDGE === '1'
+const EXTERNAL_AI_ENABLED = process.env.ALLOW_EXTERNAL_AI === '1'
 const NURUXION_AI_MODEL = process.env.NURUXION_AI_MODEL || 'onnx-community/Qwen2.5-1.5B-Instruct'
 const AI_MAX_OUTPUT_TOKENS = Math.max(300, Math.min(1200, Number(process.env.AI_MAX_OUTPUT_TOKENS) || 700))
 
@@ -63,7 +65,6 @@ const MEMBERSHIP_GROUPS_DIR = path.join(MEMBERSHIP_DATA_DIR, 'groups')
 const GROUP_SCOPES_FILE = path.join(MEMBERSHIP_DATA_DIR, 'group-scopes.json')
 const MEMBERSHIP_PLANS_FILE = path.join(MEMBERSHIP_DATA_DIR, 'plans.json')
 const STATE_FILE = path.join(DATA_DIR, 'state.json')
-const KNOWLEDGE_FILE = path.join(DATA_DIR, 'knowledge.json')
 const CONNECTION_METHOD = (process.env.CONNECTION_METHOD || 'qr').toLowerCase()
 const PHONE_NUMBER = (process.env.PHONE_NUMBER || '').replace(/\D/g, '')
 const OWNER_NUMBERS = (process.env.OWNER_NUMBERS || '')
@@ -1718,9 +1719,15 @@ let consoleBroadcastStarted = false
 let nightScheduleStarted = false
 let activitySaveTimer = null
 let knowledgeCache = {}
-const questionCooldowns = new Map()
 const questionMemory = new Map()
 const aiConversationMemory = new Map()
+const limitQuestion = createQuestionLimiter()
+const QUESTION_TTL = 15 * 60_000
+setInterval(() => {
+  const now = Date.now()
+  for (const [key, entry] of questionMemory) if (entry.expiresAt <= now) questionMemory.delete(key)
+  for (const [key, entry] of aiConversationMemory) if (entry.expiresAt <= now) aiConversationMemory.delete(key)
+}, 60_000).unref()
 const kissCooldowns = new Map()
 const punchCooldowns = new Map()
 const punchPending = new Map()
@@ -1965,9 +1972,10 @@ Para temas médicos, legales o financieros, ofrece información general prudente
 No afirmes ser humano. Tu nombre es Asistente de Nuruxion.`
 
 function rememberAiExchange(key, question, answer) {
-  const history = aiConversationMemory.get(key) || []
+  const previous = aiConversationMemory.get(key)
+  const history = previous?.expiresAt > Date.now() ? previous.history : []
   history.push({ role: 'user', content: question }, { role: 'assistant', content: answer })
-  aiConversationMemory.set(key, history.slice(-8))
+  aiConversationMemory.set(key, { history: history.slice(-8), expiresAt: Date.now() + QUESTION_TTL })
   if (aiConversationMemory.size > 300) {
     const oldest = aiConversationMemory.keys().next().value
     if (oldest) aiConversationMemory.delete(oldest)
@@ -1975,9 +1983,15 @@ function rememberAiExchange(key, question, answer) {
 }
 
 async function askReasoningModel(question, conversationKey) {
-  const history = aiConversationMemory.get(conversationKey) || []
-  const response = await fetch(`${NURUXION_AI_URL}/chat`, {
+  const endpoint = new URL(`${NURUXION_AI_URL}/chat`)
+  const local = ['127.0.0.1', '[::1]'].includes(endpoint.hostname)
+  if (endpoint.username || endpoint.password || (!local && (!EXTERNAL_AI_ENABLED || endpoint.protocol !== 'https:'))) return null
+  const previous = aiConversationMemory.get(conversationKey)
+  const history = previous?.expiresAt > Date.now() ? previous.history : []
+  const signal = AbortSignal.timeout(30_000)
+  const response = await fetch(endpoint, {
     method: 'POST',
+    redirect: 'error',
     headers: {
       ...(NURUXION_AI_TOKEN ? { Authorization: `Bearer ${NURUXION_AI_TOKEN}` } : {}),
       'Content-Type': 'application/json'
@@ -1987,13 +2001,10 @@ async function askReasoningModel(question, conversationKey) {
       history,
       maxOutputTokens: AI_MAX_OUTPUT_TOKENS
     }),
-    signal: AbortSignal.timeout(120000)
+    signal
   })
-  if (!response.ok) {
-    const detail = await response.text().catch(() => '')
-    throw new Error(`Proveedor de IA respondió ${response.status}: ${detail.slice(0, 300)}`)
-  }
-  const answer = String((await response.json())?.answer || '').trim()
+  if (!response.ok) throw new Error(`Proveedor de IA respondió ${response.status}`)
+  const answer = String(JSON.parse((await collectBounded(response.body, 128 * 1024, signal)).toString('utf8'))?.answer || '').trim()
   if (!answer) throw new Error('El proveedor de IA no devolvió texto')
   const whatsappAnswer = answer.length > 3900 ? `${answer.slice(0, 3850)}…` : answer
   rememberAiExchange(conversationKey, question, whatsappAnswer)
@@ -2065,6 +2076,7 @@ async function fetchWiktionaryKnowledge(searchTerm) {
 }
 
 async function searchGeneralKnowledge(question) {
+  if (!EXTERNAL_KNOWLEDGE_ENABLED) return null
   const cleanedQuestion = question
     .replace(/[¿?]/g, ' ')
     .replace(/^\s*(?:hola|buenas|holi|hey)\b[,!.\s]*/gi, ' ')
@@ -2114,7 +2126,8 @@ async function searchGeneralKnowledge(question) {
     hits: 1
   }
   knowledgeCache[knowledgeKey] = learned
-  await saveKnowledge()
+  const keys = Object.keys(knowledgeCache)
+  if (keys.length > 200) delete knowledgeCache[keys[0]]
   return {
     topic: searchTerm,
     title: learned.title,
@@ -2241,33 +2254,14 @@ async function convertGifToVideo(gifBuffer) {
 
 
 // ===================================================================
-// PERSISTENCIA: CARGA Y GUARDADO DE knowledge.json / state.json /
+// PERSISTENCIA: CARGA Y GUARDADO DE state.json /
 // economy.json (ver queueStateSave/queueEconomySave mas abajo)
 // ===================================================================
-async function loadKnowledge() {
-  try {
-    knowledgeCache = JSON.parse(await fs.readFile(KNOWLEDGE_FILE, 'utf8'))
-  } catch (error) {
-    if (error.code !== 'ENOENT') logger.warn({ err: error }, 'No se pudo cargar la memoria de conocimiento')
-    knowledgeCache = {}
-  }
-}
-
-async function saveKnowledge() {
-  const entries = Object.entries(knowledgeCache)
-    .sort((a, b) => (b[1].learnedAt || 0) - (a[1].learnedAt || 0))
-    .slice(0, 200)
-  knowledgeCache = Object.fromEntries(entries)
-  const temporary = `${KNOWLEDGE_FILE}.tmp`
-  await fs.writeFile(temporary, JSON.stringify(knowledgeCache, null, 2), 'utf8')
-  await fs.rename(temporary, KNOWLEDGE_FILE)
-}
-
 async function loadState() {
-  await fs.mkdir(DATA_DIR, { recursive: true })
+  await fs.mkdir(DATA_DIR, { recursive: true, mode: 0o700 })
   try {
     runtimeState = { ...runtimeState, ...JSON.parse(await fs.readFile(STATE_FILE, 'utf8')) }
-    runtimeState.conversationTopics ||= {}
+    delete runtimeState.conversationTopics // La memoria de preguntas ya no se guarda en disco.
     runtimeState.warnings ||= {}
     runtimeState.suggestions ||= {}
     runtimeState.muted ||= {}
@@ -2288,7 +2282,7 @@ async function loadState() {
 
 async function saveState() {
   const temporary = `${STATE_FILE}.tmp`
-  await fs.writeFile(temporary, JSON.stringify(runtimeState), 'utf8')
+  await fs.writeFile(temporary, JSON.stringify(runtimeState), { encoding: 'utf8', mode: 0o600 })
   await fs.rename(temporary, STATE_FILE)
 }
 
@@ -2471,7 +2465,7 @@ async function finalizeWeeklyActivity(sock, timestamp = Date.now()) {
 }
 
 async function loadEconomy() {
-  await fs.mkdir(DATA_DIR, { recursive: true })
+  await fs.mkdir(DATA_DIR, { recursive: true, mode: 0o700 })
   try {
     economyState = { ...economyState, ...JSON.parse(await fs.readFile(ECONOMY_FILE, 'utf8')) }
     economyState.wallets ||= {}
@@ -2492,7 +2486,7 @@ async function loadEconomy() {
 
 async function saveEconomy() {
   const temporary = `${ECONOMY_FILE}.tmp`
-  await fs.writeFile(temporary, JSON.stringify(economyState), 'utf8')
+  await fs.writeFile(temporary, JSON.stringify(economyState), { encoding: 'utf8', mode: 0o600 })
   await fs.rename(temporary, ECONOMY_FILE)
 }
 
@@ -2772,39 +2766,20 @@ function findCompany(companyList, query) {
   return companyList.find(company => normalizedText(company.name).includes(normalizedQuery))
 }
 
-async function renderCompanyChart(companyList, groupName) {
-  const maxLength = Math.max(...companyList.map(company => company.history.length))
-  const config = {
-    type: 'line',
-    data: {
-      labels: Array.from({ length: maxLength }, (_, index) => `${index + 1}`),
-      datasets: companyList.map((company, index) => ({
-        label: `${company.name} (${company.sector})`,
-        data: company.history.map(point => point.p),
-        borderColor: COMPANY_CHART_COLORS[index % COMPANY_CHART_COLORS.length],
-        backgroundColor: COMPANY_CHART_COLORS[index % COMPANY_CHART_COLORS.length],
-        fill: false,
-        tension: 0.3,
-        pointRadius: 2
-      }))
-    },
-    options: {
-      title: { display: true, text: `📈 Bolsa de Valores — ${groupName || 'Grupo'}`, fontColor: '#f9fafb', fontSize: 18 },
-      legend: { labels: { fontColor: '#f9fafb' } },
-      scales: {
-        xAxes: [{ ticks: { fontColor: '#9ca3af' }, gridLines: { color: '#374151' } }],
-        yAxes: [{ ticks: { fontColor: '#9ca3af', beginAtZero: false }, gridLines: { color: '#374151' } }]
-      }
-    }
-  }
-  const response = await fetch('https://quickchart.io/chart', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chart: config, width: 900, height: 550, backgroundColor: '#111827', devicePixelRatio: 2 }),
-    signal: AbortSignal.timeout(15000)
-  })
-  if (!response.ok) throw new Error(`quickchart respondió ${response.status}`)
-  return Buffer.from(await response.arrayBuffer())
+async function renderCompanyChart(companyList) {
+  const series = companyList.slice(0, 12).map(company => ({
+    name: escapeXml(String(company.name || 'Empresa').slice(0, 30)),
+    values: company.history.slice(-60).map(point => Number(point.p)).filter(Number.isFinite)
+  })).filter(company => company.values.length)
+  const all = series.flatMap(company => company.values)
+  const min = Math.min(0, ...all), max = Math.max(1, ...all)
+  const lines = series.map(({ name, values }, index) => {
+    const color = COMPANY_CHART_COLORS[index % COMPANY_CHART_COLORS.length]
+    const points = values.map((value, i) => `${50 + i * 570 / Math.max(1, values.length - 1)},${340 - 250 * (value - min) / (max - min)}`).join(' ')
+    return `<polyline points="${points}" fill="none" stroke="${color}" stroke-width="3"/><text x="645" y="${85 + index * 23}" fill="${color}" font-family="sans-serif" font-size="14">${name}</text>`
+  }).join('')
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="900" height="380"><rect width="900" height="380" fill="#111827"/><text x="50" y="48" fill="#f9fafc" font-family="sans-serif" font-size="23">Bolsa de Valores</text><path d="M50 78V340H620" fill="none" stroke="#64748b"/>${lines}</svg>`
+  return sharp(Buffer.from(svg)).png().toBuffer()
 }
 
 
@@ -2862,10 +2837,12 @@ function findMedia(content) {
 }
 
 async function downloadMediaBuffer(media, type) {
-  const stream = await downloadContentFromMessage(media, type)
-  const chunks = []
-  for await (const chunk of stream) chunks.push(chunk)
-  return Buffer.concat(chunks)
+  const maxBytes = 8 * 1024 * 1024
+  if (Number(media?.fileLength) > maxBytes) throw new Error('El archivo supera el límite de 8 MiB')
+  const signal = AbortSignal.timeout(20_000)
+  const stream = await downloadContentFromMessage({ mediaKey: media.mediaKey, url: whatsappMediaUrl(media) },
+    type, { options: { signal, redirect: 'error' } })
+  return collectBounded(stream, maxBytes, signal)
 }
 
 function quotedText(content) {
@@ -3024,7 +3001,7 @@ function isOwner(jid) {
 }
 
 function sameUser(a, b) {
-  return Boolean(a && b && areJidsSameUser(jidNormalizedUser(a), jidNormalizedUser(b)))
+  return sameAccount(a, b)
 }
 
 function targetTag(jid) {
@@ -3056,7 +3033,7 @@ function knownWhatsAppName(jids) {
 function findParticipant(metadata, jid) {
   return metadata.participants.find(item => {
     const candidates = [item.id, item.jid, item.phoneNumber, item.lid].filter(Boolean)
-    return candidates.some(candidate => sameUser(candidate, jid) || candidate === jid)
+    return candidates.some(candidate => sameAccount(candidate, jid))
   })
 }
 
@@ -3168,8 +3145,25 @@ async function enforceModeration(sock, chat, message, text, sender) {
 }
 
 async function requireAdmin(sock, chat, message, sender, metadata) {
-  if (isOwner(sender) || isAdmin(findParticipant(metadata, sender))) return true
+  if (await isOperator(sock, message, sender)) return true
+  const current = await getMetadata(sock, chat, true)
+  if (isAdmin(findParticipant(current, sender))) return true
   await reply(sock, chat, message, '⛔ Este comando es solo para administradores del grupo.')
+  return false
+}
+
+async function isOperator(sock, message, sender) {
+  if (message.key.fromMe === true || sameAccount(sender, sock.user?.id) || sameAccount(sender, sock.user?.lid) || isOwner(sender)) return true
+  if (!accountId(sender)?.endsWith('@lid')) return false
+  try {
+    const phone = await sock.signalRepository?.lidMapping?.getPNForLID(sender)
+    return isOwner(phone) || sameAccount(phone, sock.user?.id)
+  } catch { return false }
+}
+
+async function requireOperator(sock, chat, message, sender) {
+  if (await isOperator(sock, message, sender)) return true
+  await reply(sock, chat, message, '⛔ Solo el operador del bot puede cambiar la configuración o los recursos compartidos.')
   return false
 }
 
@@ -3810,7 +3804,7 @@ async function handleChristmasBot(sock, chat, sender, metadata, command, input, 
   const mentioned = context.mentionedJid?.[0]
   const member = mentioned && metadata ? findParticipant(metadata, mentioned) : null
   const target = member ? await resolveIdentity(mentioned) : null
-  const owner = !privateChat && (isOwner(jid) || isOwner(sender) || areJidsSameUser(jid, jidNormalizedUser(sock.user?.id || '')))
+  const owner = !privateChat && await isOperator(sock, message, sender)
   const result = runChristmas(economyState, { jid, group: privateChat ? '' : chat, command, input, owner, target, privateChat })
   if (result.coins) getAccount(jid).wallet += result.coins
   if (economyState.christmas2026) queueEconomySave()
@@ -3845,7 +3839,10 @@ async function handleCommand(sock, message) {
 
   // El alcance se decide antes de contar actividad, XP o ejecutar comandos.
   // Así los datos del clan y de membresías nunca se mezclan.
-  const metadata = await getMetadata(sock, chat, true)
+  const preliminaryBody = text.startsWith(PREFIX) ? text.slice(PREFIX.length).trim() : ''
+  const [preliminaryRawCommand] = preliminaryBody.split(/\s+/)
+  const preliminaryCommand = preliminaryRawCommand?.toLowerCase()
+  const metadata = await getMetadata(sock, chat, ['kick', 'warn', 'mute', 'unmute', 'close', 'open'].includes(preliminaryCommand))
   if (sender && message.pushName) {
     const participant = findParticipant(metadata, sender)
     rememberWhatsAppName([
@@ -3858,9 +3855,6 @@ async function handleCommand(sock, message) {
       participant?.lid
     ], message.pushName)
   }
-  const preliminaryBody = text.startsWith(PREFIX) ? text.slice(PREFIX.length).trim() : ''
-  const [preliminaryRawCommand] = preliminaryBody.split(/\s+/)
-  const preliminaryCommand = preliminaryRawCommand?.toLowerCase()
   const preliminaryContent = preliminaryBody.slice(preliminaryRawCommand?.length || 0).trim()
   const groupScope = getGroupScope(chat)
 
@@ -4157,7 +4151,7 @@ async function handleCommand(sock, message) {
     }
     await musicCommand.handle({
       command, query: commandContent, prefix: PREFIX, group: chat, actor: jidNormalizedUser(sender || ''),
-      authorize: () => requireAdmin(sock, chat, message, sender, metadata),
+      authorize: () => requireOperator(sock, chat, message, sender),
       reply: text => reply(sock, chat, message, text),
       sendAudio: (audio, metadata) => sock.sendMessage(chat, { audio, ...metadata }, { quoted: message })
     })
@@ -4166,23 +4160,29 @@ async function handleCommand(sock, message) {
 
   // ----- IA / preguntas -----
   if (command === 'ia' || command === 'pregunta') {
-    const cooldownKey = `${chat}:${jidNormalizedUser(sender || '')}`
+    const actor = accountId(message.key.participantAlt) || accountId(sender) || 'unknown'
+    const cooldownKey = `${chat}:${actor}`
     const now = Date.now()
-    const memory = questionMemory.get(cooldownKey) || runtimeState.conversationTopics[cooldownKey]
-    const rawQuestion = commandContent.trim()
+    const memory = questionMemory.get(cooldownKey)
+    const rawQuestion = commandContent.trim().slice(0, 1000)
     if (!rawQuestion) {
       await reply(sock, chat, message, `🤖 Escribe tu pregunta después del comando.\nEjemplo: *${PREFIX}ia explícame cómo funciona la energía solar*`)
       return
     }
     const followUpOnly = /^(?:(?:explicame|explícame|explica)(?:lo|me)?\s*(?:mejor|mas|más)?\s*)?(?:este tema|eso|esto|lo anterior|por que|por qué|y eso|dame mas|dame más|continua|continúa)[¿?!. ]*$/i.test(rawQuestion)
+    const releaseQuestion = limitQuestion(actor)
+    if (!releaseQuestion) {
+      await reply(sock, chat, message, '⏳ Espera unos segundos antes de hacer otra consulta.')
+      return
+    }
+    try {
     const effectiveQuestion = followUpOnly && memory?.expiresAt > now
-      ? `${rawQuestion || 'Continúa'} sobre ${memory.topic}`
+      ? `${rawQuestion || 'Continúa'} sobre ${memory.topic}`.slice(0, 1000)
       : rawQuestion
     if (effectiveQuestion) {
-      const rememberedQuestion = { topic: effectiveQuestion, previousTopic: memory?.topic || null, expiresAt: now + 30 * 24 * 60 * 60 * 1000 }
+      const rememberedQuestion = { topic: effectiveQuestion, expiresAt: now + QUESTION_TTL }
+      if (!questionMemory.has(cooldownKey) && questionMemory.size >= 300) questionMemory.delete(questionMemory.keys().next().value)
       questionMemory.set(cooldownKey, rememberedQuestion)
-      runtimeState.conversationTopics[cooldownKey] = rememberedQuestion
-      queueStateSave()
     }
     try {
       const modelAnswer = await askReasoningModel(effectiveQuestion, cooldownKey)
@@ -4223,18 +4223,15 @@ async function handleCommand(sock, message) {
     try {
       const researched = await searchGeneralKnowledge(effectiveQuestion)
       if (researched) {
-        const learnedTopic = { topic: researched.topic, expiresAt: now + 30 * 24 * 60 * 60 * 1000 }
+        const learnedTopic = { topic: researched.topic, expiresAt: now + QUESTION_TTL }
         questionMemory.set(cooldownKey, learnedTopic)
-        runtimeState.conversationTopics[cooldownKey] = learnedTopic
-        const topicEntries = Object.entries(runtimeState.conversationTopics).filter(([, value]) => value.expiresAt > now).slice(-500)
-        runtimeState.conversationTopics = Object.fromEntries(topicEntries)
-        queueStateSave()
       }
       await reply(sock, chat, message, researched?.text || '🤖 No encontré una respuesta confiable. Intenta formular la pregunta con palabras más específicas.')
     } catch (error) {
       logger.warn({ err: error }, 'Falló la consulta de conocimiento general')
       await reply(sock, chat, message, '⚠️ No pude consultar la fuente de conocimiento en este momento. Inténtalo nuevamente más tarde.')
     }
+    } finally { releaseQuestion() }
     return
   }
 
@@ -6714,7 +6711,7 @@ if (command === 'comerciar') {
       return `${arrow} *${company.name}* (${company.sector}): ${formatCurrency(company.price)} (${changePercent >= 0 ? '+' : ''}${changePercent.toFixed(2)}%)`
     }).join('\n')
     try {
-      const chartBuffer = await renderCompanyChart(companyList, metadata.subject)
+      const chartBuffer = await renderCompanyChart(companyList)
       await sock.sendMessage(chat, { image: chartBuffer, caption: `📊 *Bolsa de Valores*\n\n${summary}\n\nUsa *${PREFIX}comprar* / *${PREFIX}vender* para invertir.` }, { quoted: message })
     } catch (error) {
       logger.warn({ err: error }, 'No se pudo generar la gráfica de empresas')
@@ -6725,7 +6722,9 @@ if (command === 'comerciar') {
 
   // adminuser comprueba Owner/admin de la comunidad con metadatos frescos.
   // Los demás comandos conservan su control de administrador del grupo.
-  if (command !== 'adminuser' && !(await requireAdmin(sock, chat, message, sender, metadata))) return
+  if (['on', 'off', 'add', 'give'].includes(command)) {
+    if (!await requireOperator(sock, chat, message, sender)) return
+  } else if (command !== 'adminuser' && !await requireAdmin(sock, chat, message, sender, metadata)) return
 
   if (command === 'empresa') {
     if (economyState.companies[chat]) {
@@ -6830,8 +6829,6 @@ if (command === 'comerciar') {
       await reply(sock, chat, message, `Uso: *${PREFIX}give points @usuario razón*\nEjemplo: *${PREFIX}give points @usuario actividad*`)
       return
     }
-    if (!(await requireAdmin(sock, chat, message, sender, metadata))) return
-
     const target = context.mentionedJid?.[0] || context.participant
     if (!target) {
       await reply(sock, chat, message, `Debes mencionar a un usuario o responder su mensaje.\nUso: *${PREFIX}give points @usuario razón*`)
@@ -7240,7 +7237,7 @@ async function startBot() {
   if (starting) return
   starting = true
   try {
-    await fs.mkdir(SESSION_DIR, { recursive: true })
+    await fs.mkdir(SESSION_DIR, { recursive: true, mode: 0o700 })
     const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR)
     const sock = makeWASocket({
       auth: state,
@@ -7271,15 +7268,21 @@ async function startBot() {
       void handleWelcome(sock, event)
     })
     sock.ev.on('messages.upsert', ({ messages, type }) => {
-      if (type !== 'notify' && type !== 'append') return
       for (const message of messages) {
+        let release
+        try { release = acceptIncomingMessage(type, message) }
+        catch (error) {
+          logger.warn({ code: error.code }, 'No se pudo reservar el mensaje; se descartó para evitar duplicados')
+          continue
+        }
+        if (!release) continue
         void handleCommand(sock, message).catch(error => {
           logger.error({ err: error, messageId: message.key.id }, 'Fallo al procesar un comando')
           if (isAllowedGroup(message.key.remoteJid)) {
             void reply(sock, message.key.remoteJid, message, '❌ No pude completar el comando. Revisa que tenga permisos e inténtalo de nuevo.')
               .catch(sendError => logger.error({ err: sendError }, 'No se pudo enviar el aviso de error'))
           }
-        })
+        }).finally(release)
       }
     })
 
@@ -7423,9 +7426,21 @@ process.on('SIGINT', () => void shutdownGracefully('SIGINT'))
 process.on('SIGTERM', () => void shutdownGracefully('SIGTERM'))
 
 if (!ALLOWED_GROUPS.size) throw new Error('Configura ALLOWED_GROUP_JIDS antes de iniciar el bot.')
+const durableCommands = new Set(['on', 'off', 'add', 'give', 'warn', 'unwarn', 'kick', 'mute', 'unmute',
+  'close', 'open', 'antilink', 'adminuser', 'aceptar', 'rechazar', 'transferir', 'enviar',
+  'dep', 'deposito', 'retirar', 'withdraw', 'comprar', 'vender', 'music'])
+const acceptIncomingMessage = createIngress({
+  allowed: isAllowedGroup,
+  commandName: message => {
+    const text = messageText(unwrapMessage(message.message)).trimStart()
+    return text.startsWith(PREFIX) ? text.slice(PREFIX.length).trimStart().split(/\s+/, 1)[0].toLowerCase() : ''
+  },
+  durable: command => durableCommands.has(command),
+  journal: path.join(DATA_DIR, 'processed-commands.json')
+})
+await fs.mkdir(DATA_DIR, { recursive: true, mode: 0o700 })
 await loadGroupScopes()
 await loadState()
 await musicCommand.start().catch(() => logger.warn('Biblioteca musical no disponible al iniciar'))
-await loadKnowledge()
 await loadEconomy()
 await startBot()
