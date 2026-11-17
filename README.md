@@ -13,7 +13,7 @@ Esta copia de portafolio se preparó a partir del código local. No es un respal
 
 La conversión de audio usa FFmpeg. Instala FFmpeg y, si lo necesitas, yt-dlp desde fuentes oficiales y mantenlos actualizados: el bot no descarga estos ejecutables. La clasificación musical es opcional y requiere Python, Essentia y sus modelos. Las integraciones opcionales de IA y formularios se configuran por separado. Si agregas imágenes o audio propios, conserva esos archivos fuera del repositorio salvo que tengas derecho a publicarlos.
 
-## Antes de compartir
+## Informacion del bot
 
 Los comandos que cambian ajustes compartidos, entregan saldo manualmente o modifican el catálogo musical se reservan a la cuenta del bot y al propietario configurado. Los administradores de cada grupo conservan la moderación de su grupo. La búsqueda externa de conocimiento y el servicio externo de IA están desactivados de fábrica; actívalos solo si aceptas enviar consultas a esos servicios. Los gráficos se renderizan en el servidor.
 
